@@ -1,0 +1,79 @@
+variable "project_name" { type = string }
+variable "public_subnet_ids" { type = list(string) }
+variable "instance_type" { type = string }
+variable "app_port" { type = number }
+variable "asg_desired_capacity" { type = number }
+variable "asg_min_size" { type = number }
+variable "asg_max_size" { type = number }
+variable "ec2_sg_id" { type = string }
+variable "target_group_arn" { type = string }
+
+# AMI lookup for AP-SOUTH-1
+data "aws_ami" "amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+}
+
+resource "aws_launch_template" "this" {
+  name_prefix   = "${var.project_name}-lt-"
+  image_id      = data.aws_ami.amazon_linux.id
+  instance_type = var.instance_type
+
+  network_interfaces {
+    security_groups = [var.ec2_sg_id]
+  }
+
+  user_data = base64encode(<<EOF
+#!/bin/bash
+yum update -y
+yum install -y curl
+
+curl -sL https://rpm.nodesource.com/setup_18.x | bash -
+yum install -y nodejs
+
+mkdir -p /opt/app
+cat << 'APP' > /opt/app/server.js
+const http = require('http');
+const os = require('os');
+
+const hostname = '0.0.0.0';
+const port = ${var.app_port};
+
+const server = http.createServer((req, res) => {
+  res.statusCode = 200;
+  res.setHeader('Content-Type', 'text/plain');
+  res.end('Hello from instance ' + os.hostname() + '\\n');
+});
+
+server.listen(port, hostname, () => {
+  console.log('Server running');
+});
+APP
+
+cd /opt/app
+node server.js > /var/log/node-app.log 2>&1 &
+EOF
+  )
+}
+
+resource "aws_autoscaling_group" "this" {
+  name                = "${var.project_name}-asg"
+  desired_capacity    = var.asg_desired_capacity
+  max_size            = var.asg_max_size
+  min_size            = var.asg_min_size
+  vpc_zone_identifier = var.public_subnet_ids
+
+  launch_template {
+    id      = aws_launch_template.this.id
+    version = "$Latest"
+  }
+
+  target_group_arns = [var.target_group_arn]
+}
+
+output "asg_name" { value = aws_autoscaling_group.this.name }
